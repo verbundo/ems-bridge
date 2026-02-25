@@ -1,0 +1,12 @@
+ems-dev:
+  type: ems
+  url: "tcp://tibco-dev:11200"
+  username: "admin"
+  password: "encr:af845ec9:d636c6489450cfe637846b9d78a770826a396b1609c96fe700a1f2cc9f82f8e89d9a244c"
+
+routes:
+  - name: folder-to-ems
+    from: "fs:./data/in"
+    to:
+      - "ems-dev:queue:tmp.q"
+      - "fs:./data/out"
