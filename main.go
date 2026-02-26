@@ -11,11 +11,14 @@ import (
 
 func main() {
 	var configPath string
+	var dbPath string
 	flag.StringVar(&configPath, "config", "", "path to config.yml (required)")
 	flag.StringVar(&configPath, "c", "", "path to config.yml (required) (shorthand)")
+	flag.StringVar(&dbPath, "db", "config.db", "path to sqlite db file containing keys table (optional)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  --config, -c string\n\tpath to config.yml (required)\n")
+		fmt.Fprintf(os.Stderr, "  --db string\n\tpath to sqlite db file containing keys table (default: config.db)\n")
 	}
 	flag.Parse()
 
@@ -25,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := sqlite.OpenDB("config.db")
+	db, err := sqlite.OpenDB(dbPath)
 	if err != nil {
 		log.Fatalf("failed to open database: %v", err)
 	}

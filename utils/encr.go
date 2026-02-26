@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,13 +11,21 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: encr <string>")
+	var dbPath string
+	flag.StringVar(&dbPath, "db", "config.db", "path to sqlite db file containing keys table (optional)")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: encr [--db path] <string>\n")
+		fmt.Fprintf(os.Stderr, "  --db string\n\tpath to sqlite db file containing keys table (default: config.db)\n")
+	}
+	flag.Parse()
+
+	if flag.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "usage: encr [--db path] <string>")
 		os.Exit(1)
 	}
-	plaintext := os.Args[1]
+	plaintext := flag.Arg(0)
 
-	db, err := sqlite.OpenDB("config.db")
+	db, err := sqlite.OpenDB(dbPath)
 	if err != nil {
 		log.Fatalf("opening database: %v", err)
 	}
