@@ -3,9 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 
+	"ems-bridge/messages"
 	"ems-bridge/sqlite"
 )
 
@@ -30,19 +31,31 @@ func main() {
 
 	db, err := sqlite.OpenDB(dbPath)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		slog.Error("failed to open database", "err", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := sqlite.SeedKeys(db); err != nil {
-		log.Fatalf("failed to seed keys: %v", err)
+		slog.Error("failed to seed keys", "err", err)
+		os.Exit(1)
 	}
 
 	cfg, err := LoadConfig(configPath, db)
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		slog.Error("failed to load config", "err", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Connectors: %+v\n", cfg.Connectors)
-	fmt.Printf("Routes: %+v\n", cfg.Routes)
+	if err := start(cfg); err != nil {
+		slog.Error("failed to start", "err", err)
+		os.Exit(1)
+	}
+
+	msg := messages.NewMessage(
+		"sample payload",
+		map[string]string{"filename": "order_001.txt", "source": "fs:./data/in"},
+		map[string]any{"orderID": "12345", "amount": 99.99},
+	)
+	msg.Print()
 }

@@ -3,32 +3,24 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
+	"ems-bridge/components"
 	"ems-bridge/encr"
+	"ems-bridge/routes"
+
 	"gopkg.in/yaml.v3"
 )
 
-type ConnectorConfig struct {
-	Type     string `yaml:"type"`
-	URL      string `yaml:"url"`
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-}
-
-type RouteConfig struct {
-	Name string   `yaml:"name"`
-	From string   `yaml:"from"`
-	To   []string `yaml:"to"`
-}
-
 type Config struct {
-	Routes     []RouteConfig              `yaml:"routes"`
-	Connectors map[string]ConnectorConfig `yaml:",inline"`
+	Routes     []routes.RouteConfig    `yaml:"routes"`
+	Components []components.Component  `yaml:"components"`
 }
 
 func LoadConfig(path string, db *sql.DB) (*Config, error) {
+	slog.Info("reading config", "path", path)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
@@ -39,6 +31,8 @@ func LoadConfig(path string, db *sql.DB) (*Config, error) {
 		return nil, fmt.Errorf("parsing config file: %w", err)
 	}
 
+	slog.Info("config loaded", "components", len(cfg.Components), "routes", len(cfg.Routes))
+
 	if err := cfg.decrypt(db); err != nil {
 		return nil, fmt.Errorf("decrypting config: %w", err)
 	}
@@ -47,13 +41,15 @@ func LoadConfig(path string, db *sql.DB) (*Config, error) {
 }
 
 func (cfg *Config) decrypt(db *sql.DB) error {
-	for name, conn := range cfg.Connectors {
-		dec, err := maybeDecrypt(db, conn.Password)
-		if err != nil {
-			return fmt.Errorf("connector %q password: %w", name, err)
+	for name, component := range cfg.Components {
+		for k, v := range component.Properties {
+			dec, err := maybeDecrypt(db, v)
+			if err != nil {
+				return fmt.Errorf("component %q property %q: %w", name, k, err)
+			}
+			component.Properties[k] = dec
 		}
-		conn.Password = dec
-		cfg.Connectors[name] = conn
+		cfg.Components[name] = component
 	}
 	return nil
 }
