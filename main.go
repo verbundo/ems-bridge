@@ -6,11 +6,19 @@ import (
 	"log/slog"
 	"os"
 
-	"ems-bridge/messages"
 	"ems-bridge/sqlite"
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02T15:04:05.000Z07:00"))
+			}
+			return a
+		},
+	})))
+
 	var configPath string
 	var dbPath string
 	flag.StringVar(&configPath, "config", "", "path to config.yml (required)")
@@ -51,11 +59,4 @@ func main() {
 		slog.Error("failed to start", "err", err)
 		os.Exit(1)
 	}
-
-	msg := messages.NewMessage(
-		"sample payload",
-		map[string]string{"filename": "order_001.txt", "source": "fs:./data/in"},
-		map[string]any{"orderID": "12345", "amount": 99.99},
-	)
-	msg.Print()
 }

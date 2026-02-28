@@ -3,6 +3,7 @@ package messages
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // Header is a read-only string attribute set by a route starter at message
@@ -50,8 +51,24 @@ func (m *Message) Header(name string) (string, bool) {
 	return h, ok
 }
 
-// Print outputs the message headers, properties and payload as indented JSON.
-func (m *Message) Print() {
+// LogValue implements slog.LogValuer so *Message can be passed directly to slog.
+// slog's JSON handler calls json.Marshal on the returned AnyValue, embedding it
+// as a proper JSON object rather than a quoted string.
+func (m *Message) LogValue() slog.Value {
+	type messageJSON struct {
+		Headers    map[string]string `json:"headers"`
+		Properties map[string]any    `json:"properties"`
+		Payload    any               `json:"payload"`
+	}
+	return slog.AnyValue(messageJSON{
+		Headers:    m.headers,
+		Properties: m.Properties,
+		Payload:    m.Payload,
+	})
+}
+
+// Convert the message to a string for logging. This is used by slog's default text handler, which calls fmt.Sprint on the returned string.
+func (m *Message) String() string {
 	type messageJSON struct {
 		Headers    map[string]string `json:"headers"`
 		Properties map[string]any    `json:"properties"`
@@ -66,8 +83,12 @@ func (m *Message) Print() {
 
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		fmt.Printf("error marshalling message: %v\n", err)
-		return
+		return fmt.Sprintf("error marshalling message: %v", err)
 	}
-	fmt.Println(string(data))
+	return string(data)
+}
+
+// Print outputs the message headers, properties and payload as indented JSON.
+func (m *Message) Print() {
+	fmt.Println(m.String())
 }

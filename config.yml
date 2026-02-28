@@ -16,9 +16,9 @@ routes:
           inputFolder: ./data/in
           eventType: FILE_CREATE
           processExistingOnStartup: true
-          checkSubfolders: false
+          checkSubfolders: true
           filenameSuffixes: "['txt']"
-          filenamePrefixes: "'order'"
+          filenamePrefixes: "['order']"
           outputFolder: ./data/out
     processors:
       - id: ems-sender

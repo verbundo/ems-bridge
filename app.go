@@ -40,12 +40,19 @@ func NewApplication(cfg *Config) (*Application, error) {
 	return app, nil
 }
 
-// Start starts all components in the application.
+// Start starts all components and initializes all routes.
 func (app *Application) Start() error {
 	slog.Info("starting components")
 	for _, c := range app.Components {
 		if err := c.Start(); err != nil {
 			return fmt.Errorf("starting component: %w", err)
+		}
+	}
+
+	slog.Info("initializing routes")
+	for _, r := range app.Routes {
+		if err := r.Init(); err != nil {
+			return fmt.Errorf("initializing route %q: %w", r.Name, err)
 		}
 	}
 	return nil

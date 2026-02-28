@@ -1,6 +1,10 @@
 package processors
 
-import "fmt"
+import (
+	"fmt"
+
+	"ems-bridge/messages"
+)
 
 // JmsSendProcessor sends messages to a JMS destination.
 type JmsSendProcessor struct {
@@ -20,7 +24,7 @@ func newJmsSendProcessor(cfg ProcessorConfig) (*JmsSendProcessor, error) {
 	}, nil
 }
 
-func (p *JmsSendProcessor) Process() error {
+func (p *JmsSendProcessor) Process(msg *messages.Message) error {
 	fmt.Printf("JmsSendProcessor %q: sending to %s %q via component %q\n",
 		p.ID, p.destinationType, p.destination, p.componentRef)
 	return nil

@@ -1,6 +1,10 @@
 package starters
 
-import "fmt"
+import (
+	"fmt"
+
+	"ems-bridge/messages"
+)
 
 // StarterConfig holds the common attributes shared by all starter types.
 type StarterConfig struct {
@@ -9,6 +13,9 @@ type StarterConfig struct {
 	Properties map[string]string `yaml:"properties"`
 }
 
+// Handler is a function called by a starter for each message it produces.
+type Handler func(*messages.Message) error
+
 // Runner is the interface every concrete starter must implement.
 type Runner interface {
 	Start() error
@@ -16,10 +23,11 @@ type Runner interface {
 }
 
 // New creates a concrete Runner from cfg, dispatching on cfg.Type.
-func New(cfg StarterConfig) (Runner, error) {
+// handler is called for every message the starter produces.
+func New(cfg StarterConfig, handler Handler) (Runner, error) {
 	switch cfg.Type {
 	case "file_event":
-		return newFileEventStarter(cfg)
+		return newFileEventStarter(cfg, handler)
 	default:
 		return nil, fmt.Errorf("unknown starter type: %q", cfg.Type)
 	}

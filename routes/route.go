@@ -2,7 +2,9 @@ package routes
 
 import (
 	"fmt"
+	"log/slog"
 
+	"ems-bridge/messages"
 	"ems-bridge/processors"
 	"ems-bridge/starters"
 )
@@ -36,7 +38,7 @@ func New(cfg RouteConfig) (*Route, error) {
 	route := &Route{Name: cfg.Name}
 
 	for _, sc := range cfg.StarterConfigs {
-		s, err := starters.New(sc)
+		s, err := starters.New(sc, route.Execute)
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", cfg.Name, err)
 		}
@@ -62,6 +64,7 @@ func New(cfg RouteConfig) (*Route, error) {
 // Init resolves the first processor — the one not referenced as a "to" in any
 // link. Returns an error if more than one such processor is found.
 func (r *Route) Init() error {
+	slog.Info("initializing route", "name", r.Name)
 	toIDs := make(map[string]bool, len(r.Links))
 	for _, l := range r.Links {
 		toIDs[l.To] = true
@@ -78,5 +81,50 @@ func (r *Route) Init() error {
 	}
 
 	r.FirstProcessor = first
+	for _, s := range r.Starters {
+		if err := s.Start(); err != nil {
+			return fmt.Errorf("route %q: starting starter: %w", r.Name, err)
+		}
+	}
+	return nil
+}
+
+// Execute runs msg through the processor chain starting from FirstProcessor,
+// following Links in order.
+func (r *Route) Execute(msg *messages.Message) error {
+	// Build ID -> Runner and ID -> nextID maps.
+	byID := make(map[string]processors.Runner, len(r.Processors))
+	for i, id := range r.processorIDs {
+		byID[id] = r.Processors[i]
+	}
+	nextID := make(map[string]string, len(r.Links))
+	for _, l := range r.Links {
+		nextID[l.From] = l.To
+	}
+
+	// Find the ID of FirstProcessor.
+	var currentID string
+	for i, p := range r.Processors {
+		if p == r.FirstProcessor {
+			currentID = r.processorIDs[i]
+			break
+		}
+	}
+
+	slog.Info("route input message", "route", r.Name, "message", msg)
+
+	for currentID != "" {
+		p, ok := byID[currentID]
+		if !ok {
+			return fmt.Errorf("route %q: processor %q not found", r.Name, currentID)
+		}
+		slog.Info("executing processor", "route", r.Name, "processor", currentID)
+		if err := p.Process(msg); err != nil {
+			return fmt.Errorf("route %q: processor %q: %w", r.Name, currentID, err)
+		}
+		currentID = nextID[currentID]
+	}
+
+	slog.Info("route output message", "route", r.Name, "message", msg)
 	return nil
 }

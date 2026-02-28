@@ -1,6 +1,10 @@
 package processors
 
-import "fmt"
+import (
+	"fmt"
+
+	"ems-bridge/messages"
+)
 
 // ProcessorConfig holds the common attributes shared by all processor types.
 type ProcessorConfig struct {
@@ -11,7 +15,7 @@ type ProcessorConfig struct {
 
 // Runner is the interface every concrete processor must implement.
 type Runner interface {
-	Process() error
+	Process(msg *messages.Message) error
 }
 
 // New creates a concrete Runner from cfg, dispatching on cfg.Type.
