@@ -171,6 +171,11 @@ func (s *FileEventStarter) scanExisting() error {
 			if err := s.handler(msg); err != nil {
 				return fmt.Errorf("handler error for %q: %w", path, err)
 			}
+			if s.outputFolder != "" {
+				if err := s.moveFile(path, info.Name()); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -215,6 +220,18 @@ func (s *FileEventStarter) matches(name string) bool {
 	}
 
 	return true
+}
+
+func (s *FileEventStarter) moveFile(src, name string) error {
+	if err := os.MkdirAll(s.outputFolder, 0755); err != nil {
+		return fmt.Errorf("FileEventStarter %q: creating output folder %q: %w", s.ID, s.outputFolder, err)
+	}
+	dst := filepath.Join(s.outputFolder, name)
+	if err := os.Rename(src, dst); err != nil {
+		return fmt.Errorf("FileEventStarter %q: moving %q to %q: %w", s.ID, src, dst, err)
+	}
+	slog.Info("FileEventStarter: file moved to output folder", "id", s.ID, "src", src, "dst", dst)
+	return nil
 }
 
 func (s *FileEventStarter) Stop() error {
