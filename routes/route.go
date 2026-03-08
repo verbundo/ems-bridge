@@ -3,6 +3,7 @@ package routes
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"ems-bridge/messages"
 	"ems-bridge/processors"
@@ -34,10 +35,12 @@ type Route struct {
 }
 
 // New creates a Route from cfg, instantiating all starters, processors and links.
-func New(cfg RouteConfig) (*Route, error) {
+// mux is injected into each StarterConfig so HTTP-based starters can register handlers.
+func New(cfg RouteConfig, mux *http.ServeMux) (*Route, error) {
 	route := &Route{Name: cfg.Name}
 
 	for _, sc := range cfg.StarterConfigs {
+		sc.Mux = mux
 		s, err := starters.New(sc, route.Execute)
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", cfg.Name, err)

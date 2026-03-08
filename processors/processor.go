@@ -23,6 +23,8 @@ func New(cfg ProcessorConfig) (Runner, error) {
 	switch cfg.Type {
 	case "jms_send":
 		return newJmsSendProcessor(cfg)
+	case "transform":
+		return newTransformerProcessor(cfg)
 	default:
 		return nil, fmt.Errorf("unknown processor type: %q", cfg.Type)
 	}

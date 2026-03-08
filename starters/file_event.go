@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"ems-bridge/expr"
 	"ems-bridge/messages"
@@ -42,6 +44,11 @@ type FileEventStarter struct {
 	filenamePrefixes         []string
 	filenameRegexes          []string
 	outputFolder             string
+	lockFileSuffix           string
+	pollingInterval          time.Duration
+	sem                      chan struct{} // limits concurrent file processing
+	done                     chan struct{}
+	stopOnce                 sync.Once
 	handler                  Handler
 }
 
@@ -97,6 +104,20 @@ func newFileEventStarter(s StarterConfig, handler Handler) (*FileEventStarter, e
 		return nil, fmt.Errorf("starter %q: invalid filenameRegexes: %w", s.ID, err)
 	}
 
+	lockFileSuffix := p["lockFileSuffix"]
+	if lockFileSuffix == "" {
+		lockFileSuffix = ".lock"
+	}
+
+	intervalStr := p["pollingInterval"]
+	if intervalStr == "" {
+		intervalStr = "2s"
+	}
+	pollingInterval, err := time.ParseDuration(intervalStr)
+	if err != nil {
+		return nil, fmt.Errorf("starter %q: invalid pollingInterval: %w", s.ID, err)
+	}
+
 	return &FileEventStarter{
 		StarterConfig:            s,
 		inputFolder:              p["inputFolder"],
@@ -107,17 +128,39 @@ func newFileEventStarter(s StarterConfig, handler Handler) (*FileEventStarter, e
 		filenamePrefixes:         prefixes,
 		filenameRegexes:          regexes,
 		outputFolder:             p["outputFolder"],
+		lockFileSuffix:           lockFileSuffix,
+		pollingInterval:          pollingInterval,
+		sem:                      make(chan struct{}, 4),
+		done:                     make(chan struct{}),
 		handler:                  handler,
 	}, nil
 }
 
 func (s *FileEventStarter) Start() error {
-	slog.Info("FileEventStarter starting", "id", s.ID, "inputFolder", s.inputFolder, "eventType", s.eventType)
-
-	if s.processExistingOnStartup {
-		return s.scanExisting()
-	}
+	slog.Info("FileEventStarter starting", "id", s.ID, "inputFolder", s.inputFolder, "eventType", s.eventType, "pollingInterval", s.pollingInterval)
+	go s.poll()
 	return nil
+}
+
+func (s *FileEventStarter) poll() {
+	if !s.processExistingOnStartup {
+		// wait for the first interval before scanning
+		select {
+		case <-s.done:
+			return
+		case <-time.After(s.pollingInterval):
+		}
+	}
+	for {
+		if err := s.scanExisting(); err != nil {
+			slog.Error("FileEventStarter: scan error", "id", s.ID, "err", err)
+		}
+		select {
+		case <-s.done:
+			return
+		case <-time.After(s.pollingInterval):
+		}
+	}
 }
 
 func (s *FileEventStarter) scanExisting() error {
@@ -144,41 +187,53 @@ func (s *FileEventStarter) scanExisting() error {
 		}
 	}
 
-	return walk(s.inputFolder, func(path string, info os.FileInfo, err error) error {
+	var wg sync.WaitGroup
+	walkErr := walk(s.inputFolder, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			slog.Warn("FileEventStarter: error accessing path", "id", s.ID, "path", path, "err", err)
 			return nil
 		}
-		if info.IsDir() {
+		if info.IsDir() || strings.HasSuffix(info.Name(), s.lockFileSuffix) {
 			return nil
 		}
 		if s.matches(info.Name()) {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return fmt.Errorf("reading file %q: %w", path, err)
-			}
-			msg := messages.NewMessage(
-				data,
-				map[string]string{
-					"filename":    info.Name(),
-					"path":        path,
-					"inputFolder": s.inputFolder,
-				},
-				map[string]any{},
-			)
-			slog.Info("FileEventStarter: message created", "id", s.ID, "message", msg.String())
-			msg.Print()
-			if err := s.handler(msg); err != nil {
-				return fmt.Errorf("handler error for %q: %w", path, err)
-			}
-			if s.outputFolder != "" {
-				if err := s.moveFile(path, info.Name()); err != nil {
-					return err
+			s.sem <- struct{}{} // block until a slot is free
+			wg.Add(1)
+			go func(path string, info os.FileInfo) {
+				defer wg.Done()
+				defer func() { <-s.sem }()
+				if err := s.processFile(path, info); err != nil {
+					slog.Error("FileEventStarter: error processing file", "id", s.ID, "path", path, "err", err)
 				}
-			}
+			}(path, info)
 		}
 		return nil
 	})
+	wg.Wait()
+	s.cleanStaleLocks()
+	return walkErr
+}
+
+// cleanStaleLocks removes any lock files left in the input folder after all
+// processing goroutines have finished. Remaining locks are stale (e.g. from a
+// previous crashed run) and safe to delete at this point.
+func (s *FileEventStarter) cleanStaleLocks() {
+	entries, err := os.ReadDir(s.inputFolder)
+	if err != nil {
+		slog.Warn("FileEventStarter: cannot read input folder for lock cleanup", "id", s.ID, "err", err)
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), s.lockFileSuffix) {
+			continue
+		}
+		lockPath := filepath.Join(s.inputFolder, e.Name())
+		if err := os.Remove(lockPath); err != nil {
+			slog.Warn("FileEventStarter: failed to remove stale lock file", "id", s.ID, "lockFile", lockPath, "err", err)
+		} else {
+			slog.Warn("FileEventStarter: removed stale lock file", "id", s.ID, "lockFile", lockPath)
+		}
+	}
 }
 
 func (s *FileEventStarter) matches(name string) bool {
@@ -222,6 +277,71 @@ func (s *FileEventStarter) matches(name string) bool {
 	return true
 }
 
+func (s *FileEventStarter) processFile(path string, info os.FileInfo) error {
+	acquired, err := s.acquireLock(path)
+	if err != nil {
+		return err
+	}
+	if !acquired {
+		slog.Info("FileEventStarter: file locked by another instance, skipping", "id", s.ID, "path", path)
+		return nil
+	}
+	defer s.releaseLock(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading file %q: %w", path, err)
+	}
+
+	msg := messages.NewMessage(
+		data,
+		map[string]string{
+			"filename":    info.Name(),
+			"path":        path,
+			"inputFolder": s.inputFolder,
+		},
+		map[string]any{},
+	)
+	slog.Info("FileEventStarter: message created", "id", s.ID, "message", msg)
+	msg.Print()
+
+	if err := s.handler(msg); err != nil {
+		return fmt.Errorf("handler error for %q: %w", path, err)
+	}
+
+	if s.outputFolder != "" {
+		if err := s.moveFile(path, info.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// acquireLock creates a .lock file atomically. Returns false (without error) if
+// the lock file already exists, meaning another instance holds the lock.
+func (s *FileEventStarter) acquireLock(path string) (bool, error) {
+	lockPath := path + s.lockFileSuffix
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("creating lock file %q: %w", lockPath, err)
+	}
+	f.Close()
+	slog.Info("FileEventStarter: lock acquired", "id", s.ID, "lockFile", lockPath)
+	return true, nil
+}
+
+func (s *FileEventStarter) releaseLock(path string) {
+	lockPath := path + s.lockFileSuffix
+	if err := os.Remove(lockPath); err != nil {
+		slog.Warn("FileEventStarter: failed to remove lock file", "id", s.ID, "lockFile", lockPath, "err", err)
+		return
+	}
+	slog.Info("FileEventStarter: lock released", "id", s.ID, "lockFile", lockPath)
+}
+
 func (s *FileEventStarter) moveFile(src, name string) error {
 	if err := os.MkdirAll(s.outputFolder, 0755); err != nil {
 		return fmt.Errorf("FileEventStarter %q: creating output folder %q: %w", s.ID, s.outputFolder, err)
@@ -235,6 +355,7 @@ func (s *FileEventStarter) moveFile(src, name string) error {
 }
 
 func (s *FileEventStarter) Stop() error {
+	s.stopOnce.Do(func() { close(s.done) })
 	slog.Info("FileEventStarter stopped", "id", s.ID)
 	return nil
 }

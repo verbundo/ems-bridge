@@ -10,7 +10,9 @@ import (
 )
 
 func main() {
+	var logLevel slog.LevelVar // defaults to Info
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: &logLevel,
 		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				a.Value = slog.StringValue(a.Value.Time().Format("2006-01-02T15:04:05.000Z07:00"))
@@ -53,6 +55,14 @@ func main() {
 	if err != nil {
 		slog.Error("failed to load config", "err", err)
 		os.Exit(1)
+	}
+
+	if cfg.LogLevel != "" {
+		if err := logLevel.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+			slog.Warn("invalid logLevel in config, using INFO", "logLevel", cfg.LogLevel)
+		} else {
+			slog.Info("log level set", "level", cfg.LogLevel)
+		}
 	}
 
 	if err := start(cfg); err != nil {

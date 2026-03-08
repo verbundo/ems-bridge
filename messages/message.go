@@ -51,6 +51,15 @@ func (m *Message) Header(name string) (string, bool) {
 	return h, ok
 }
 
+// Headers returns a copy of all headers as a map.
+func (m *Message) Headers() map[string]string {
+	out := make(map[string]string, len(m.headers))
+	for k, v := range m.headers {
+		out[k] = v
+	}
+	return out
+}
+
 // LogValue implements slog.LogValuer so *Message can be passed directly to slog.
 // slog's JSON handler calls json.Marshal on the returned AnyValue, embedding it
 // as a proper JSON object rather than a quoted string.

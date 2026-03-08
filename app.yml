@@ -1,0 +1,46 @@
+components:
+  - name: ems-dev
+    type: jms
+    properties:
+      provider: tibjms
+      url: tcp://tibco-dev:11200
+      username: admin
+      password: "encr:02f13e62:b71b713aca76fb066e5bf9a1261ffa0e1e1729c8839436e1bbf6c4f37e5f4d59ded07775"
+
+routes:
+  - name: folder-to-ems
+    starters: 
+      - id: folder-watcher
+        type: file_event
+        properties:
+          inputFolder: ./data/in
+          eventType: FILE_CREATE
+          processExistingOnStartup: true
+          checkSubfolders: true
+          filenameSuffixes: "['txt']"
+          filenamePrefixes: "['order']"
+          outputFolder: ./data/out
+    processors:
+      - id: ems-sender
+        type: jms_send
+        properties:
+          component-ref: ems-dev
+          destination-type: queue
+          destination: tmp.q
+    links: []
+  
+  - name: http-hello-world
+    starters: 
+      - id: http-get-users
+        type: rest
+        properties:
+          method: GET
+          uri: /users
+    processors:
+      - id: get-users
+        type: transform
+        properties:
+          type: custom
+          script: |
+            'Hello world'
+    links: []
