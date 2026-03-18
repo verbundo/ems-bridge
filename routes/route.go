@@ -43,6 +43,7 @@ func New(cfg RouteConfig, mux *http.ServeMux, registry components.Registry) (*Ro
 
 	for _, sc := range cfg.StarterConfigs {
 		sc.Mux = mux
+		sc.Registry = registry
 		s, err := starters.New(sc, route.Execute)
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", cfg.Name, err)

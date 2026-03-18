@@ -6,6 +6,7 @@ package tibco
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"syscall"
 	"unsafe"
 )
@@ -55,8 +56,25 @@ var (
 	procTextMsg_GetText  = dll.NewProc("tibemsTextMsg_GetText")
 	procMsg_Destroy             = dll.NewProc("tibemsMsg_Destroy")
 	procMsg_SetReplyTo          = dll.NewProc("tibemsMsg_SetReplyTo")
+	procMsg_GetReplyTo          = dll.NewProc("tibemsMsg_GetReplyTo")
 	procMsg_GetMessageID        = dll.NewProc("tibemsMsg_GetMessageID")
 	procMsg_SetStringProperty   = dll.NewProc("tibemsMsg_SetStringProperty")
+	procMsg_Acknowledge         = dll.NewProc("tibemsMsg_Acknowledge")
+	procMsg_GetStringProperty   = dll.NewProc("tibemsMsg_GetStringProperty")
+	procMsg_GetPropertyNames    = dll.NewProc("tibemsMsg_GetPropertyNames")
+	procMsg_GetTimestamp        = dll.NewProc("tibemsMsg_GetTimestamp")
+	procMsg_GetDeliveryMode     = dll.NewProc("tibemsMsg_GetDeliveryMode")
+	procMsg_GetExpiration       = dll.NewProc("tibemsMsg_GetExpiration")
+	procMsg_GetPriority         = dll.NewProc("tibemsMsg_GetPriority")
+	procMsg_GetRedelivered      = dll.NewProc("tibemsMsg_GetRedelivered")
+	procMsg_GetCorrelationID    = dll.NewProc("tibemsMsg_GetCorrelationID")
+	procMsg_GetType             = dll.NewProc("tibemsMsg_GetType")
+	procMsg_GetDestination      = dll.NewProc("tibemsMsg_GetDestination")
+
+	procMsgEnum_GetNextName = dll.NewProc("tibemsMsgEnum_GetNextName")
+	procMsgEnum_Destroy     = dll.NewProc("tibemsMsgEnum_Destroy")
+
+	procDestination_GetName = dll.NewProc("tibemsDestination_GetName")
 
 	procSession_CreateTemporaryQueue = dll.NewProc("tibemsSession_CreateTemporaryQueue")
 	procSession_CreateConsumer       = dll.NewProc("tibemsSession_CreateConsumer")
@@ -74,8 +92,16 @@ var (
 const (
 	tibemsOK              = uintptr(0)
 	tibemsFALSE           = uintptr(0)
-	tibemsAutoAcknowledge = uintptr(1) // TIBEMS_AUTO_ACKNOWLEDGE
 	tibemsWaitForever     = uintptr(0) // TIBEMS_WAIT_FOREVER for ReceiveTimeout
+)
+
+// AcknowledgeMode mirrors tibemsAcknowledgeMode.
+type AcknowledgeMode uintptr
+
+const (
+	AcknowledgeAuto    AcknowledgeMode = 1 // TIBEMS_AUTO_ACKNOWLEDGE
+	AcknowledgeClient  AcknowledgeMode = 2 // TIBEMS_CLIENT_ACKNOWLEDGE
+	AcknowledgeDupsOK  AcknowledgeMode = 3 // TIBEMS_DUPS_OK_ACKNOWLEDGE
 )
 
 type DestinationType int
@@ -120,6 +146,215 @@ type SendResult struct {
 // create Sessions or MessageProducers can use this value in further DLL calls.
 func (c *Connection) Handle() uintptr { return c.handle }
 
+// ConsumeQueue polls queueName for messages, calling handler for each one.
+// It returns when done is closed or an unrecoverable error occurs.
+// A 250 ms receive timeout is used so the done channel is checked frequently.
+// When acknowledgeMode is AcknowledgeClient, each message is acknowledged only
+// after the handler returns without error.
+// replyTo is the JMSReplyTo destination name, or empty string if not set.
+func (c *Connection) ConsumeQueue(queueName, messageSelector string, acknowledgeMode AcknowledgeMode, handler func(payload, replyTo string, props map[string]string) error, done <-chan struct{}) error {
+	var session uintptr
+	if s, _, _ := procConnection_CreateSession.Call(
+		c.handle,
+		uintptr(unsafe.Pointer(&session)),
+		tibemsFALSE,
+		uintptr(acknowledgeMode),
+	); s != tibemsOK {
+		return tibemsError("tibemsConnection_CreateSession", s)
+	}
+	defer procSession_Close.Call(session)
+
+	var dest uintptr
+	queueNameCStr, _ := syscall.BytePtrFromString(queueName)
+	if s, _, _ := procQueue_Create.Call(
+		uintptr(unsafe.Pointer(&dest)),
+		uintptr(unsafe.Pointer(queueNameCStr)),
+	); s != tibemsOK {
+		return tibemsError("tibemsQueue_Create", s)
+	}
+	defer procDestination_Destroy.Call(dest)
+
+	var selectorPtr uintptr
+	if messageSelector != "" {
+		cstr, _ := syscall.BytePtrFromString(messageSelector)
+		selectorPtr = uintptr(unsafe.Pointer(cstr))
+	}
+
+	var consumer uintptr
+	if s, _, _ := procSession_CreateConsumer.Call(
+		session,
+		uintptr(unsafe.Pointer(&consumer)),
+		dest,
+		selectorPtr, // message selector (0 = none)
+		tibemsFALSE, // noLocal = false
+	); s != tibemsOK {
+		return tibemsError("tibemsSession_CreateConsumer", s)
+	}
+	defer procMsgConsumer_Close.Call(consumer)
+
+	for {
+		select {
+		case <-done:
+			return nil
+		default:
+		}
+
+		var msg uintptr
+		procMsgConsumer_ReceiveTimeout.Call(
+			consumer,
+			uintptr(unsafe.Pointer(&msg)),
+			250, // 250 ms polling timeout
+		)
+		if msg == 0 {
+			continue
+		}
+
+		var textPtr uintptr
+		procTextMsg_GetText.Call(msg, uintptr(unsafe.Pointer(&textPtr)))
+		text := cString(textPtr)
+
+		props := msgProperties(msg)
+		std := standardJmsHeaders(msg)
+		for k, v := range std {
+			props[k] = v
+		}
+		replyTo := std["JMSReplyTo"]
+
+		if err := handler(text, replyTo, props); err != nil {
+			procMsg_Destroy.Call(msg)
+			return err
+		}
+
+		if acknowledgeMode == AcknowledgeClient {
+			procMsg_Acknowledge.Call(msg)
+		}
+		procMsg_Destroy.Call(msg)
+	}
+}
+
+// tibemsEndOfData is the status returned by tibemsMsgEnum_GetNextName when the
+// enumeration is exhausted (TIBEMS_END_OF_DATA = 11).
+const tibemsEndOfData = uintptr(11)
+
+// msgProperties enumerates all JMS string properties on msg and returns them as
+// a map. Non-string properties are skipped silently.
+func msgProperties(msg uintptr) map[string]string {
+	props := make(map[string]string)
+	var enum uintptr
+	if s, _, _ := procMsg_GetPropertyNames.Call(msg, uintptr(unsafe.Pointer(&enum))); s != tibemsOK || enum == 0 {
+		return props
+	}
+	defer procMsgEnum_Destroy.Call(enum)
+
+	for {
+		var namePtr uintptr
+		s, _, _ := procMsgEnum_GetNextName.Call(enum, uintptr(unsafe.Pointer(&namePtr)))
+		if s == tibemsEndOfData || namePtr == 0 {
+			break
+		}
+		if s != tibemsOK {
+			break
+		}
+		name := cString(namePtr)
+		var valPtr uintptr
+		if sv, _, _ := procMsg_GetStringProperty.Call(msg, namePtr, uintptr(unsafe.Pointer(&valPtr))); sv == tibemsOK && valPtr != 0 {
+			props[name] = cString(valPtr)
+		}
+	}
+	return props
+}
+
+// standardJmsHeaders reads the standard JMS header fields from msg and returns
+// them as a string map keyed by the conventional JMS header name.
+func standardJmsHeaders(msg uintptr) map[string]string {
+	h := make(map[string]string)
+
+	var msgIDPtr uintptr
+	if s, _, _ := procMsg_GetMessageID.Call(msg, uintptr(unsafe.Pointer(&msgIDPtr))); s == tibemsOK && msgIDPtr != 0 {
+		h["JMSMessageID"] = cString(msgIDPtr)
+	}
+
+	var timestamp int64
+	if s, _, _ := procMsg_GetTimestamp.Call(msg, uintptr(unsafe.Pointer(&timestamp))); s == tibemsOK {
+		h["JMSTimestamp"] = strconv.FormatInt(timestamp, 10)
+	}
+
+	var deliveryMode int32
+	if s, _, _ := procMsg_GetDeliveryMode.Call(msg, uintptr(unsafe.Pointer(&deliveryMode))); s == tibemsOK {
+		switch DeliveryMode(deliveryMode) {
+		case DeliveryPersistent:
+			h["JMSDeliveryMode"] = "PERSISTENT"
+		case DeliveryNonPersistent:
+			h["JMSDeliveryMode"] = "NON_PERSISTENT"
+		default:
+			h["JMSDeliveryMode"] = strconv.Itoa(int(deliveryMode))
+		}
+	}
+
+	var expiration int64
+	if s, _, _ := procMsg_GetExpiration.Call(msg, uintptr(unsafe.Pointer(&expiration))); s == tibemsOK {
+		h["JMSExpiration"] = strconv.FormatInt(expiration, 10)
+	}
+
+	var priority int32
+	if s, _, _ := procMsg_GetPriority.Call(msg, uintptr(unsafe.Pointer(&priority))); s == tibemsOK {
+		h["JMSPriority"] = strconv.Itoa(int(priority))
+	}
+
+	var redelivered int32
+	if s, _, _ := procMsg_GetRedelivered.Call(msg, uintptr(unsafe.Pointer(&redelivered))); s == tibemsOK {
+		if redelivered != 0 {
+			h["JMSRedelivered"] = "true"
+		} else {
+			h["JMSRedelivered"] = "false"
+		}
+	}
+
+	var corrIDPtr uintptr
+	if s, _, _ := procMsg_GetCorrelationID.Call(msg, uintptr(unsafe.Pointer(&corrIDPtr))); s == tibemsOK && corrIDPtr != 0 {
+		h["JMSCorrelationID"] = cString(corrIDPtr)
+	}
+
+	var typePtr uintptr
+	if s, _, _ := procMsg_GetType.Call(msg, uintptr(unsafe.Pointer(&typePtr))); s == tibemsOK && typePtr != 0 {
+		h["JMSType"] = cString(typePtr)
+	}
+
+	var dest uintptr
+	if s, _, _ := procMsg_GetDestination.Call(msg, uintptr(unsafe.Pointer(&dest))); s == tibemsOK && dest != 0 {
+		h["JMSDestination"] = destinationName(dest)
+	}
+
+	if rt := replyToName(msg); rt != "" {
+		h["JMSReplyTo"] = rt
+	}
+
+	return h
+}
+
+// destinationName reads the name of dest into a stack-allocated buffer.
+// tibemsDestination_GetName writes directly into the supplied char* buffer,
+// so we must pass a byte slice rather than a pointer-to-pointer.
+func destinationName(dest uintptr) string {
+	var buf [1024]byte
+	procDestination_GetName.Call(dest, uintptr(unsafe.Pointer(&buf[0])))
+	for i, b := range buf {
+		if b == 0 {
+			return string(buf[:i])
+		}
+	}
+	return string(buf[:])
+}
+
+// replyToName extracts the JMSReplyTo destination name from msg, or returns "".
+func replyToName(msg uintptr) string {
+	var dest uintptr
+	if s, _, _ := procMsg_GetReplyTo.Call(msg, uintptr(unsafe.Pointer(&dest))); s != tibemsOK || dest == 0 {
+		return ""
+	}
+	return destinationName(dest)
+}
+
 func (c *Connection) PublishTextMessage(destinationName string, destType DestinationType, message string, props []JmsProp, cfg SendConfig) (SendResult, error) {
 	var session uintptr
 	var dest uintptr
@@ -130,7 +365,7 @@ func (c *Connection) PublishTextMessage(destinationName string, destType Destina
 		c.handle,
 		uintptr(unsafe.Pointer(&session)),
 		tibemsFALSE,           // not transacted
-		tibemsAutoAcknowledge, // auto acknowledge
+		uintptr(AcknowledgeAuto), // auto acknowledge
 	); s != tibemsOK {
 		return SendResult{}, tibemsError("tibemsConnection_CreateSession", s)
 	}

@@ -62,6 +62,7 @@ func (s *RestStarter) Start() error {
 		for k, vals := range r.Header {
 			headers[k] = strings.Join(vals, ",")
 		}
+		headers["starter.id"] = s.ID
 		headers["method"] = r.Method
 		headers["uri"] = r.RequestURI
 

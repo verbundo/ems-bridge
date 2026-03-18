@@ -50,3 +50,19 @@ routes:
           script: |
             'Hello world'
     links: []
+  
+  - name: ems-to-logger
+    starters:
+      - id: ems-consumer
+        type: jms_queue_consumer
+        properties:
+          component-ref: ems-dev
+          queueName: tmp.q
+    processors:
+      - id: transform
+        type: transform
+        properties:
+          type: custom
+          script: |
+             Payload
+    links: []

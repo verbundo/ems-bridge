@@ -296,6 +296,7 @@ func (s *FileEventStarter) processFile(path string, info os.FileInfo) error {
 	msg := messages.NewMessage(
 		data,
 		map[string]string{
+			"starter.id":  s.ID,
 			"filename":    info.Name(),
 			"path":        path,
 			"inputFolder": s.inputFolder,
