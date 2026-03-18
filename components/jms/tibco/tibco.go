@@ -46,14 +46,17 @@ var (
 
 	procDestination_Destroy = dll.NewProc("tibemsDestination_Destroy")
 
-	procMsgProducer_Send  = dll.NewProc("tibemsMsgProducer_Send")
-	procMsgProducer_Close = dll.NewProc("tibemsMsgProducer_Close")
+	procMsgProducer_Send   = dll.NewProc("tibemsMsgProducer_Send")
+	procMsgProducer_SendEx = dll.NewProc("tibemsMsgProducer_SendEx")
+	procMsgProducer_Close  = dll.NewProc("tibemsMsgProducer_Close")
 
 	procTextMsg_Create  = dll.NewProc("tibemsTextMsg_Create")
 	procTextMsg_SetText  = dll.NewProc("tibemsTextMsg_SetText")
 	procTextMsg_GetText  = dll.NewProc("tibemsTextMsg_GetText")
-	procMsg_Destroy     = dll.NewProc("tibemsMsg_Destroy")
-	procMsg_SetReplyTo  = dll.NewProc("tibemsMsg_SetReplyTo")
+	procMsg_Destroy             = dll.NewProc("tibemsMsg_Destroy")
+	procMsg_SetReplyTo          = dll.NewProc("tibemsMsg_SetReplyTo")
+	procMsg_GetMessageID        = dll.NewProc("tibemsMsg_GetMessageID")
+	procMsg_SetStringProperty   = dll.NewProc("tibemsMsg_SetStringProperty")
 
 	procSession_CreateTemporaryQueue = dll.NewProc("tibemsSession_CreateTemporaryQueue")
 	procSession_CreateConsumer       = dll.NewProc("tibemsSession_CreateConsumer")
@@ -82,58 +85,176 @@ const (
 	Topic
 )
 
+// DeliveryMode mirrors tibemsDeliveryMode.
+type DeliveryMode int32
+
+const (
+	DeliveryPersistent    DeliveryMode = 1
+	DeliveryNonPersistent DeliveryMode = 2
+)
+
+// JmsProp is a name/value pair set as a JMS string property on the outbound message.
+type JmsProp struct {
+	Name  string
+	Value string
+}
+
+// SendConfig carries per-send QoS settings and optional request-reply parameters.
+type SendConfig struct {
+	DeliveryMode    DeliveryMode
+	Priority        int
+	TimeToLive      int64  // ms; 0 = no expiration
+	ExpectReply     bool
+	UseTmpReplyDest bool
+	ReplyDestName   string // named reply-to queue (used when !UseTmpReplyDest)
+	ReplyTimeout    int64  // ms; 0 = wait forever
+}
+
+// SendResult is returned by PublishTextMessage.
+type SendResult struct {
+	MessageID    string
+	ReplyPayload string // non-empty only when ExpectReply=true and a reply was received
+}
+
 // Handle returns the raw tibemsConnection handle. Processors that need to
 // create Sessions or MessageProducers can use this value in further DLL calls.
 func (c *Connection) Handle() uintptr { return c.handle }
 
-func (c *Connection) PublishTextMessage(destinationName string, destType DestinationType, message string) error {
+func (c *Connection) PublishTextMessage(destinationName string, destType DestinationType, message string, props []JmsProp, cfg SendConfig) (SendResult, error) {
 	var session uintptr
-	var destNamePtr uintptr
+	var dest uintptr
 	var producer uintptr
-	var messagePtr uintptr
 	var msg uintptr
+
 	if s, _, _ := procConnection_CreateSession.Call(
 		c.handle,
 		uintptr(unsafe.Pointer(&session)),
 		tibemsFALSE,           // not transacted
 		tibemsAutoAcknowledge, // auto acknowledge
 	); s != tibemsOK {
-		return tibemsError("tibemsConnection_CreateSession", s)
+		return SendResult{}, tibemsError("tibemsConnection_CreateSession", s)
 	}
+
+	destNameCStr, _ := syscall.BytePtrFromString(destinationName)
 
 	if destType == Queue {
 		if s, _, _ := procQueue_Create.Call(
-			uintptr(unsafe.Pointer(&destinationName)), uintptr(unsafe.Pointer(destNamePtr)),
+			uintptr(unsafe.Pointer(&dest)),
+			uintptr(unsafe.Pointer(destNameCStr)),
 		); s != tibemsOK {
-			return tibemsError("tibemsQueue_Create", s)
+			return SendResult{}, tibemsError("tibemsQueue_Create", s)
 		}
 	} else {
 		if s, _, _ := procTopic_Create.Call(
-			uintptr(unsafe.Pointer(&destinationName)), uintptr(unsafe.Pointer(destNamePtr)),
+			uintptr(unsafe.Pointer(&dest)),
+			uintptr(unsafe.Pointer(destNameCStr)),
 		); s != tibemsOK {
-			return tibemsError("tibemsTopic_Create", s)
+			return SendResult{}, tibemsError("tibemsTopic_Create", s)
 		}
 	}
 
 	if s, _, _ := procSession_CreateProducer.Call(
-		session, uintptr(unsafe.Pointer(&producer)), destNamePtr,
+		session, uintptr(unsafe.Pointer(&producer)), dest,
 	); s != tibemsOK {
-		return tibemsError("tibemsSession_CreateProducer", s)
+		return SendResult{}, tibemsError("tibemsSession_CreateProducer", s)
 	}
 
 	if s, _, _ := procTextMsg_Create.Call(uintptr(unsafe.Pointer(&msg))); s != tibemsOK {
-		return tibemsError("tibemsTextMsg_Create", s)
+		return SendResult{}, tibemsError("tibemsTextMsg_Create", s)
 	}
 
-	if s, _, _ := procTextMsg_SetText.Call(msg, uintptr(unsafe.Pointer(messagePtr))); s != tibemsOK {
-		return tibemsError("tibemsTextMsg_SetText", s)
+	messageCStr, _ := syscall.BytePtrFromString(message)
+	if s, _, _ := procTextMsg_SetText.Call(msg, uintptr(unsafe.Pointer(messageCStr))); s != tibemsOK {
+		return SendResult{}, tibemsError("tibemsTextMsg_SetText", s)
 	}
 
-	if s, _, _ := procMsgProducer_Send.Call(producer, msg); s != tibemsOK {
-		return tibemsError("tibemsMsgProducer_Send", s)
+	for _, p := range props {
+		nameCStr, _ := syscall.BytePtrFromString(p.Name)
+		valCStr, _ := syscall.BytePtrFromString(p.Value)
+		if s, _, _ := procMsg_SetStringProperty.Call(
+			msg,
+			uintptr(unsafe.Pointer(nameCStr)),
+			uintptr(unsafe.Pointer(valCStr)),
+		); s != tibemsOK {
+			return SendResult{}, tibemsError("tibemsMsg_SetStringProperty", s)
+		}
 	}
 
-	return nil
+	// Set reply-to destination when request-reply is expected.
+	var replyDest uintptr
+	if cfg.ExpectReply {
+		if cfg.UseTmpReplyDest {
+			if s, _, _ := procSession_CreateTemporaryQueue.Call(
+				session, uintptr(unsafe.Pointer(&replyDest)),
+			); s != tibemsOK {
+				return SendResult{}, tibemsError("tibemsSession_CreateTemporaryQueue", s)
+			}
+		} else if cfg.ReplyDestName != "" {
+			replyNameCStr, _ := syscall.BytePtrFromString(cfg.ReplyDestName)
+			if s, _, _ := procQueue_Create.Call(
+				uintptr(unsafe.Pointer(&replyDest)),
+				uintptr(unsafe.Pointer(replyNameCStr)),
+			); s != tibemsOK {
+				return SendResult{}, tibemsError("tibemsQueue_Create (reply)", s)
+			}
+		}
+		if replyDest != 0 {
+			if s, _, _ := procMsg_SetReplyTo.Call(msg, replyDest); s != tibemsOK {
+				return SendResult{}, tibemsError("tibemsMsg_SetReplyTo", s)
+			}
+		}
+	}
+
+	if s, _, _ := procMsgProducer_SendEx.Call(
+		producer, msg,
+		uintptr(cfg.DeliveryMode),
+		uintptr(cfg.Priority),
+		uintptr(cfg.TimeToLive),
+	); s != tibemsOK {
+		return SendResult{}, tibemsError("tibemsMsgProducer_SendEx", s)
+	}
+
+	var msgIDPtr uintptr
+	if s, _, _ := procMsg_GetMessageID.Call(msg, uintptr(unsafe.Pointer(&msgIDPtr))); s != tibemsOK {
+		return SendResult{}, tibemsError("tibemsMsg_GetMessageID", s)
+	}
+
+	result := SendResult{MessageID: cString(msgIDPtr)}
+
+	// Wait for reply when requested.
+	if cfg.ExpectReply && replyDest != 0 {
+		var consumer uintptr
+		if s, _, _ := procSession_CreateConsumer.Call(
+			session,
+			uintptr(unsafe.Pointer(&consumer)),
+			replyDest,
+			0,           // no message selector
+			tibemsFALSE, // noLocal = false
+		); s != tibemsOK {
+			return result, tibemsError("tibemsSession_CreateConsumer", s)
+		}
+		defer procMsgConsumer_Close.Call(consumer)
+		if cfg.UseTmpReplyDest {
+			defer procTemporaryQueue_Delete.Call(replyDest)
+		}
+
+		var replyMsg uintptr
+		if s, _, _ := procMsgConsumer_ReceiveTimeout.Call(
+			consumer,
+			uintptr(unsafe.Pointer(&replyMsg)),
+			uintptr(cfg.ReplyTimeout), // 0 = TIBEMS_WAIT_FOREVER
+		); s != tibemsOK {
+			return result, tibemsError("tibemsMsgConsumer_ReceiveTimeout", s)
+		}
+		if replyMsg != 0 {
+			var textPtr uintptr
+			procTextMsg_GetText.Call(replyMsg, uintptr(unsafe.Pointer(&textPtr)))
+			result.ReplyPayload = cString(textPtr)
+			procMsg_Destroy.Call(replyMsg)
+		}
+	}
+
+	return result, nil
 }
 
 // NewConnection lazy-loads the TIBCO EMS C client DLL identified by dllName

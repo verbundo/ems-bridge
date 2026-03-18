@@ -27,6 +27,12 @@ routes:
           component-ref: ems-dev
           destination-type: queue
           destination: tmp.q
+          jmsProperties:
+            - name: OrderType
+              value: Properties["order.type"]
+            - name: FileName
+              value: Headers["filename"]
+              condition: 'Headers["filename"] != ""'
     links: []
 
   - name: http-hello-world
