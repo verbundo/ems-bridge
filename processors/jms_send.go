@@ -213,7 +213,16 @@ func (p *JmsSendProcessor) Process(msg *messages.Message) error {
 		sendCfg.ReplyDestName = s
 	}
 
-	body := fmt.Sprintf("%v", msg.Payload)
+	var body string
+	switch v := msg.Payload.(type) {
+	case string:
+		body = v
+	case []byte:
+		body = string(v)
+	default:
+		body = fmt.Sprintf("%v", v)
+	}
+	fmt.Printf("JmsSendProcessor %q: sending to %s %q:\n%s\n", p.ID, p.destinationType, p.destination, body)
 	result, err := conn.PublishTextMessage(p.destination, destType, body, jmsProps, sendCfg)
 	if err != nil {
 		return err
