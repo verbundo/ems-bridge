@@ -3,6 +3,7 @@ package processors
 import (
 	"fmt"
 
+	"ems-bridge/components"
 	"ems-bridge/messages"
 )
 
@@ -19,10 +20,11 @@ type Runner interface {
 }
 
 // New creates a concrete Runner from cfg, dispatching on cfg.Type.
-func New(cfg ProcessorConfig) (Runner, error) {
+// registry is used by processors that reference a named component (e.g. jms_send).
+func New(cfg ProcessorConfig, registry components.Registry) (Runner, error) {
 	switch cfg.Type {
 	case "jms_send":
-		return newJmsSendProcessor(cfg)
+		return newJmsSendProcessor(cfg, registry)
 	case "transform":
 		return newTransformerProcessor(cfg)
 	default:

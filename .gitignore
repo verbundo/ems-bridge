@@ -1,4 +1,8 @@
 ems-bridge
+ems-bridge.exe
 utils/encr
+utils/encr.exe
+http_client/http_client
+http_client/http_client.exe
 config.db
 .key

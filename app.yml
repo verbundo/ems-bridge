@@ -2,14 +2,14 @@ components:
   - name: ems-dev
     type: jms
     properties:
-      provider: tibjms
-      url: tcp://tibco-dev:11200
+      provider: tibems
+      url: tcp://localhost:7222
       username: admin
-      password: "encr:02f13e62:b71b713aca76fb066e5bf9a1261ffa0e1e1729c8839436e1bbf6c4f37e5f4d59ded07775"
+      password: ""
 
 routes:
   - name: folder-to-ems
-    starters: 
+    starters:
       - id: folder-watcher
         type: file_event
         properties:
@@ -28,9 +28,9 @@ routes:
           destination-type: queue
           destination: tmp.q
     links: []
-  
+
   - name: http-hello-world
-    starters: 
+    starters:
       - id: http-get-users
         type: rest
         properties:

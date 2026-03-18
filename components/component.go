@@ -15,6 +15,11 @@ type Runner interface {
 	Stop() error
 }
 
+// Registry maps component names to their live Runner instances.
+// It is built once after all components are created and passed to routes so
+// processors can resolve their component-ref at construction time.
+type Registry map[string]Runner
+
 // New creates a concrete Runner from cfg, dispatching on cfg.Type.
 func New(cfg Component) (Runner, error) {
 	switch cfg.Type {

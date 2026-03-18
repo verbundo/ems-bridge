@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"ems-bridge/components"
 	"ems-bridge/messages"
 	"ems-bridge/processors"
 	"ems-bridge/starters"
@@ -36,7 +37,8 @@ type Route struct {
 
 // New creates a Route from cfg, instantiating all starters, processors and links.
 // mux is injected into each StarterConfig so HTTP-based starters can register handlers.
-func New(cfg RouteConfig, mux *http.ServeMux) (*Route, error) {
+// registry is passed to processors so they can resolve their component-ref.
+func New(cfg RouteConfig, mux *http.ServeMux, registry components.Registry) (*Route, error) {
 	route := &Route{Name: cfg.Name}
 
 	for _, sc := range cfg.StarterConfigs {
@@ -49,7 +51,7 @@ func New(cfg RouteConfig, mux *http.ServeMux) (*Route, error) {
 	}
 
 	for _, pc := range cfg.ProcessorConfigs {
-		p, err := processors.New(pc)
+		p, err := processors.New(pc, registry)
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", cfg.Name, err)
 		}

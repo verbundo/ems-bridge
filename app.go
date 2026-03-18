@@ -38,6 +38,9 @@ func NewApplication(cfg *Config) (*Application, error) {
 		tlsKey:  cfg.TLSKey,
 	}
 
+	// First pass: create all components across every app and register them by
+	// name so processors can resolve their component-ref at construction time.
+	registry := make(components.Registry)
 	for _, appCfg := range cfg.Apps {
 		for _, cc := range appCfg.Components {
 			slog.Info("creating component", "name", cc.Name, "type", cc.Type, "app", appCfg.Name)
@@ -46,11 +49,15 @@ func NewApplication(cfg *Config) (*Application, error) {
 				return nil, fmt.Errorf("app %q: creating component %q: %w", appCfg.Name, cc.Name, err)
 			}
 			app.Components = append(app.Components, c)
+			registry[cc.Name] = c
 		}
+	}
 
+	// Second pass: create all routes now that every component is registered.
+	for _, appCfg := range cfg.Apps {
 		for _, rc := range appCfg.Routes {
 			slog.Info("creating route", "name", rc.Name, "app", appCfg.Name)
-			r, err := routes.New(rc, mux)
+			r, err := routes.New(rc, mux, registry)
 			if err != nil {
 				return nil, fmt.Errorf("app %q: creating route %q: %w", appCfg.Name, rc.Name, err)
 			}
