@@ -1,0 +1,17 @@
+routes:
+  - name: http-hello-world
+    starters:
+      - id: http-get-users
+        type: rest
+        properties:
+          method: GET
+          uri: /users
+    processors:
+      - id: get-users
+        type: transform
+        properties:
+          type: custom
+          script: |
+            'Hello world'
+    links: []
+  

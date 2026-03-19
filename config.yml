@@ -6,4 +6,4 @@ tlsKey: ./certs/key.pem
 
 apps:
   - name: app1
-    file: ./app.yml
+    file: ./app2.yml
